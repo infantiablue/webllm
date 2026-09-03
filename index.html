@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>WebLLM — economic-data extraction</title>
+		<link href="style.css" rel="stylesheet" type="text/css" />
+	</head>
+	<body>
+		<h1>WebLLM — economic-data extraction</h1>
+		<p id="modelNote">Loading model list…</p>
+		<p id="status">Idle — click "Extract economic data" to start.</p>
+
+		<div class="label">Download / load progress</div>
+		<pre id="progress">(waiting to start)</pre>
+
+		<div class="label">Source document — edit or paste your own</div>
+		<textarea id="docText" rows="9" spellcheck="false"></textarea>
+
+		<div class="label">Extraction output</div>
+		<pre id="result"></pre>
+
+		<button id="rerun">Extract economic data</button>
+
+		<script type="module">
+			import { CreateMLCEngine, prebuiltAppConfig } from "https://esm.run/@mlc-ai/web-llm";
+
+			const status = document.getElementById("status");
+			const progress = document.getElementById("progress");
+			const result = document.getElementById("result");
+			const modelNote = document.getElementById("modelNote");
+			const docText = document.getElementById("docText");
+			const rerunBtn = document.getElementById("rerun");
+
+			// Switch models by editing this line.
+			// - Llama-3.2-1B: tried-and-tested WebLLM demo model, clean config, ~1 GB.
+			// - gemma3-1b: hit a config conflict (sliding window) and truncated output
+			//   on this build; kept as an experiment.
+			const MODEL_ID = "Llama-3.2-1B-Instruct-q4f16_1-MLC";
+			// const MODEL_ID = "gemma3-1b-it-q4f16_1-MLC";
+
+			modelNote.textContent = `Model: ${MODEL_ID} (downloads weights on first run)`;
+
+			// WebLLM's grammar init runs on a fire-and-forget promise that our try/catch
+			// cannot see. Surface any unhandled rejection on the page instead of losing it.
+			window.addEventListener("unhandledrejection", (e) => {
+				const msg = e?.reason?.message || String(e?.reason ?? e);
+				progress.textContent = `⚠ unhandled rejection: ${msg}`;
+				result.textContent += `\n\n(console also reported: ${msg})`;
+			});
+
+			if (!("gpu" in navigator)) {
+				rerunBtn.disabled = true;
+				status.textContent = "ERROR: this browser has no WebGPU.";
+				result.textContent = "Open this page in Chrome or Safari (local file/localhost) with WebGPU enabled.";
+				result.className = "error";
+			} else {
+				navigator.gpu.requestAdapter().then((adapter) => {
+					const name = adapter ? adapter.info?.description || "adapter found" : "none";
+					status.textContent = `WebGPU available (${name}). Click "Extract economic data" to load the model.`;
+				});
+			}
+
+			const economicDataPrompt = `You extract economic data from central-bank meeting minutes or similar
+policy documents and return a JSON object.
+
+Extract EVERY explicit, numerically-grounded economic data point the text
+mentions: inflation measures, GDP growth, unemployment, payrolls, wages,
+trade, interest rates, and foreign-economy indicators. Do not summarize
+these away — list each as its own entry.
+
+Rules:
+- Record values exactly as stated. Do not convert units, annualize, or
+  round. Do not add context that is not in the text.
+- If the text gives a number, put it in "value" with its "unit". If it
+  gives only a qualitative comparison ("slightly below its 2024 pace",
+  "unchanged from September"), set value to null and keep the qualifier
+  verbatim in "reference_comparison".
+- Preserve the time context precisely. Put the period the number refers
+  to (e.g. "November 2025", "Q4 2025", "12 months ending December") in
+  "period". When the text compares two periods, capture both.
+- Set "economy" to a jurisdiction, not a date. For US Fed minutes, "US"
+  is the default even when the text never says "US"; change it only when
+  a data point names another economy ("Canada", "Mexico", "China", "Euro
+  area", "Japan"). If a rate change names a specific central bank (Bank
+  of England), record it in that data point's "economy". Never put a
+  month or quarter in "economy".
+- Distinguish facts from staff estimates. If the text says "the staff
+  estimated", copy that attribution into "note" and do NOT present the
+  value as a hard figure.
+- Keep caveats verbatim-ish in "note" (e.g. "data collection issues from
+  the government shutdown likely pushed down November levels").
+- Exclude opinion, forward-looking policy discussion, and redacted
+  summaries. Extract data only.
+- If a requested number is genuinely absent from the text, use null —
+  never invent one.
+
+Only output the JSON object, nothing else, no markdown fences.`;
+
+			const policyDoc = `
+			The information available at the time of the meeting indicated that real GDP continued to expand in 2025, at a rate slightly below its 2024 pace. Labor market conditions showed signs of stabilizing following a period of gradual cooling. Consumer price inflation remained somewhat elevated.
+The unemployment rate was 4.4 percent in December, unchanged from its level in September. The average monthly change in total payrolls turned negative in the fourth quarter, reflecting a large drop in government employment in October as workers rolled off payrolls after the end of the deferred resignation program; average payroll gains in November and December were similar to the average gains seen over the third quarter. Average hourly earnings rose 3.8 percent over the 12 months ending in December, slightly below their year-earlier pace.
+Total consumer price inflation—as measured by the 12-month change in the price index for PCE—was 2.8 percent in November, a little higher than its year-earlier pace of 2.6 percent. Core PCE price inflation, which excludes changes in consumer energy prices and many consumer food prices, was 2.8 percent in November, compared with 3.0 percent a year earlier. Core services price inflation had declined relative to a year earlier, led by a deceleration in housing services prices. However, core goods price inflation had picked up over that period, a development that the staff largely attributed to the effects of higher tariffs. In December, the 12-month change in the CPI was 2.7 percent and core CPI inflation was 2.6 percent; both were below their year-earlier rates. Based on the CPI, the staff estimated that total PCE price inflation was 2.9 percent in December and core PCE price inflation was 3.0 percent. The staff also noted that data collection issues related to the government shutdown had likely pushed down the levels of the CPI and the PCE price index in November and December.
+Real GDP posted a solid gain in the third quarter. Available indicators suggested that real GDP growth had slowed in the fourth quarter, with the government shutdown estimated to have reduced fourth-quarter real GDP growth about 1 percentage point. Real private domestic final purchases (PDFP)—which comprises PCE and private fixed investment and which often provides a better signal of underlying economic momentum than does GDP—rose at the same average pace as real GDP over the first three quarters of 2025; available indicators suggested that real PDFP growth also slowed in the fourth quarter but less markedly than real GDP growth. Nominal goods exports rose further in October, while nominal goods imports declined sharply after falling in the third quarter. Accordingly, the goods trade deficit continued to narrow following a substantial widening at the start of 2025 that resulted from a front-loading of imports ahead of anticipated tariff hikes.
+Recent indicators suggested that foreign economic activity expanded at a below-trend pace in the second half of last year. U.S. tariffs continued to weigh on foreign manufacturing activity, notably for Canada and Mexico in autos, aluminum, steel, and related industries. By contrast, in some emerging Asian economies, exports of high-tech products surged amid robust demand from the artificial intelligence (AI) boom. In China, activity was boosted by strong exports to markets other than the U.S.
+Headline inflation continued to run near central bank targets in many foreign economies, although upward pressures on food and services prices remained in some jurisdictions. A few foreign central banks cut their policy rates, including the Bank of England and the Bank of Mexico, but most others left them unchanged. The Bank of Japan was a notable exception, raising its key policy rate toward its assessment of the neutral range.`;
+			docText.value = policyDoc;
+
+			// JSON Schema string for WebLLM's grammar compiler. json_object mode requires
+			// schema as a string; without it, undefined reaches CompileJSONSchema.
+			const economicDataSchema = {
+				type: "object",
+				properties: {
+					data_points: {
+						type: "array",
+						items: {
+							type: "object",
+							properties: {
+								measure: { type: "string", description: "specific measure e.g. '12-month core PCE', 'average hourly earnings YoY'" },
+								economy: { type: "string", description: "jurisdiction: US, Canada, Mexico, China, Japan, or region" },
+								period: { type: "string", description: "time the value refers to, e.g. 'November 2025', 'Q4 2025'" },
+								value: { type: ["number", "null"], description: "exact number if stated, else null" },
+								unit: { type: "string", description: "percent, percentage points, thousands, basis points" },
+								reference_comparison: { type: "string", description: "'vs prior period' qualifier, verbatim if qualitative" },
+								note: { type: "string", description: "staff estimate / caveat / data issue" },
+								source_quote: { type: "string", description: "short verbatim phrase the data point came from" },
+							},
+							required: ["measure", "economy", "period", "value", "unit"],
+						},
+					},
+					as_of_date: { type: "string", description: "latest reference date stated in the document if any" },
+					policy_actions: {
+						type: "array",
+						items: {
+							type: "object",
+							properties: {
+								central_bank: { type: "string" },
+								action: { type: "string", description: "'cut', 'raised', 'held', 'unchanged'" },
+								direction: { type: "string", description: "'rate cut', 'rate hike', 'hold'" },
+							},
+							required: ["central_bank", "action"],
+						},
+					},
+				},
+				required: ["data_points"],
+			};
+
+			function isValidJson(text) {
+				try {
+					JSON.parse(text);
+					return true;
+				} catch (_) {
+					return false;
+				}
+			}
+
+			function clean(text) {
+				return text
+					.trim()
+					.replace(/^```(?:json)?\s*/i, "")
+					.replace(/```\s*$/, "");
+			}
+
+			function renderOutput(text) {
+				const trimmed = clean(text);
+				if (isValidJson(trimmed)) {
+					return JSON.stringify(JSON.parse(trimmed), null, 2);
+				}
+				const start = trimmed.indexOf("{");
+				const end = trimmed.lastIndexOf("}");
+				if (start !== -1 && end > start) {
+					const slice = trimmed.slice(start, end + 1);
+					if (isValidJson(slice)) {
+						return "Note: model wrapped its answer in prose. Parsed JSON:\n" + JSON.stringify(JSON.parse(slice), null, 2);
+					}
+				}
+				return trimmed + "\n\n(⚠ not valid JSON — this is exactly why constrained JSON mode matters)";
+			}
+
+			function stageLog(entries) {
+				return entries
+					.map((e, i) => `— attempt ${i + 1}: ${e.mode} (budget ${e.budget}), got ${e.chars} chars, valid JSON: ${e.valid}, shape ok: ${!!e.shape}`)
+					.join("\n");
+			}
+
+			const MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+
+			// hasExpectedShape: does the parsed JSON satisfy the schema top-level contract?
+			// isAccepted: valid JSON AND the right shape — the real success test.
+			function hasExpectedShape(obj) {
+				return !!obj && typeof obj === "object" && !Array.isArray(obj) && Array.isArray(obj.data_points);
+			}
+			function isAccepted(text) {
+				return isValidJson(text) && hasExpectedShape(JSON.parse(text));
+			}
+
+			// Heuristic semantic check. The grammar guarantees valid JSON, not that each
+			// field's content matches what its name means; a 1B model will happily put a
+			// month into "economy" or a number into a text field. Warn, don't repair — a
+			// warning beats a silently wrong-looking chart.
+			function semanticIssues(obj) {
+				if (!obj || !Array.isArray(obj.data_points)) {
+					return obj ? ["Missing data_points array"] : ["No parsed object"];
+				}
+				const issues = [];
+				obj.data_points.forEach((d, i) => {
+					const econ = String(d.economy || "")
+						.trim()
+						.toLowerCase();
+					if (MONTHS.includes(econ) || /^q[1-4]$/.test(econ)) {
+						issues.push(`data_points[${i}]: "economy" is a time ("${d.economy}") — should be a jurisdiction (e.g. US)`);
+					}
+					if (typeof d.value !== "undefined" && d.value !== null && typeof d.value !== "number") {
+						issues.push(`data_points[${i}]: "value" is not a number or null ("${d.value}")`);
+					}
+					if (econ && d.period && econ === String(d.period).trim().toLowerCase()) {
+						issues.push(`data_points[${i}]: "economy" and "period" are identical ("${d.economy}")`);
+					}
+				});
+				return issues;
+			}
+
+			async function run() {
+				rerunBtn.disabled = true;
+				progress.textContent = "Creating engine…";
+				result.textContent = "";
+				result.className = "";
+				status.textContent = "Loading model… (first run downloads weights)";
+
+				// Only gemma3-1b needs the sliding-window override; Llama-3.2 has a clean config.
+				const appConfig = (() => {
+					if (!MODEL_ID.startsWith("gemma3-1b")) return prebuiltAppConfig;
+					return {
+						...prebuiltAppConfig,
+						model_list: prebuiltAppConfig.model_list.map((r) =>
+							r.model_id === MODEL_ID ? { ...r, overrides: { ...(r?.overrides || {}), sliding_window_size: -1 } } : r,
+						),
+					};
+				})();
+
+				const attempts = [];
+
+				try {
+					const engine = await CreateMLCEngine(MODEL_ID, {
+						appConfig,
+						initProgressCallback: (p) => {
+							progress.textContent = `${(p.progress * 100).toFixed(1)}%  ${p.text}`;
+						},
+					});
+
+					status.textContent = "Model loaded. Generating…";
+
+					let out = "";
+					const messages = [
+						{ role: "system", content: economicDataPrompt },
+						{ role: "user", content: docText.value.trim() },
+					];
+
+					// 1) Constrained JSON mode with an explicit schema string. These policy
+					//    documents yield many data points, so 1024 to avoid truncation.
+					try {
+						const reply = await engine.chat.completions.create({
+							messages,
+							response_format: { type: "json_object", schema: JSON.stringify(economicDataSchema) },
+							max_tokens: 1024,
+						});
+						out = reply?.choices?.[0]?.message?.content || "";
+						attempts.push({ mode: "constrained", budget: 1024, chars: out.length, valid: isValidJson(clean(out)), shape: isAccepted(clean(out)) });
+						progress.textContent = attempts[0].valid
+							? "Generated with constrained JSON mode ✓"
+							: "Constrained JSON incomplete — trying plain generation…";
+					} catch (err1) {
+						attempts.push({ mode: `constrained (error: ${err1?.message || err1})`, budget: 1024, chars: 0, valid: false, shape: false });
+						progress.textContent = `JSON mode failed (${err1?.message || err1}); using plain generation…`;
+					}
+
+					// 2) Plain fallback with growing token budget (above the constrained ceiling).
+					//    Success now means valid JSON AND the schema top-level shape.
+					if (!(out && isAccepted(clean(out)))) {
+						for (const budget of [1024, 2048]) {
+							try {
+								const reply = await engine.chat.completions.create({ messages, max_tokens: budget });
+								out = reply?.choices?.[0]?.message?.content || "";
+								attempts.push({ mode: "plain", budget, chars: out.length, valid: isValidJson(clean(out)), shape: isAccepted(clean(out)) });
+								progress.textContent = `Plain generation attempt (${budget} tokens): ${out.length} chars, valid JSON: ${isValidJson(clean(out))}, shape ok: ${isAccepted(clean(out))}`;
+								if (isAccepted(clean(out))) break;
+							} catch (err2) {
+								out = "";
+								attempts.push({ mode: `plain (error: ${err2?.message || err2})`, budget, chars: 0, valid: false, shape: false });
+								progress.textContent = `Generation failed: ${err2?.message || err2}`;
+								break;
+							}
+						}
+					}
+
+					status.textContent = "Done.";
+					rerunBtn.disabled = false;
+					if (out && isAccepted(clean(out))) {
+						result.textContent = renderOutput(out);
+						const issues = semanticIssues(JSON.parse(clean(out)));
+						if (issues.length) {
+							result.textContent +=
+								"\n\n── Semantic check (heuristic) ──\n" +
+								issues.join("\n") +
+								"\nShape matches the schema; these values don't match their field names. Re-run or switch model.";
+						}
+					} else {
+						result.textContent =
+							(out ? renderOutput(out) + "\n\n" : "") +
+							"── All attempts ──\n" +
+							stageLog(attempts) +
+							(out && isValidJson(clean(out)) && !isAccepted(clean(out))
+								? "\n\nNote: the last attempt was valid JSON but didn't match the schema shape (missing data_points array)."
+								: "") +
+							"\n\nPaste this whole block if you need help.";
+					}
+				} catch (err) {
+					result.textContent = `Error: ${err?.message || err}\n\nOpen the browser console (Cmd+Opt+J) for the full WebLLM log.`;
+					result.className = "error";
+					status.textContent = "Failed — see output pane.";
+					rerunBtn.disabled = false;
+				}
+			}
+
+			document.getElementById("rerun").addEventListener("click", run);
+		</script>
+	</body>
+</html>
